@@ -43,6 +43,14 @@ exports.handler = async (event) => {
   const client = new S3Client({
     region: 'auto',
     endpoint: `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
+    // Las versiones nuevas del SDK de AWS (>=3.729) agregan por defecto un checksum
+    // (x-amz-checksum-crc32 / x-amz-sdk-checksum-algorithm) a la URL firmada. El PUT
+    // que hace el navegador no envía ese checksum y R2 responde HTTP 400. Este fork no
+    // tiene package-lock.json, así que Netlify instala la última versión del SDK y
+    // cae en ese caso. Pedimos el checksum solo cuando es obligatorio (en SDK viejos
+    // estas dos opciones se ignoran sin efecto).
+    requestChecksumCalculation: 'WHEN_REQUIRED',
+    responseChecksumValidation: 'WHEN_REQUIRED',
     credentials: {
       accessKeyId: R2_ACCESS_KEY_ID,
       secretAccessKey: R2_SECRET_ACCESS_KEY,
