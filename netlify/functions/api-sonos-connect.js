@@ -40,7 +40,17 @@ exports.handler = async (event) => {
       const { data: conn } = await sb.from('sonos_connections').select('*').eq('client_id', clientId).maybeSingle();
       if (!conn || conn.status !== 'conectado') return { statusCode:200, headers:H, body: JSON.stringify({ connected:false, groups:[] }) };
       const accessToken = await sonos.getValidAccessToken(sb, conn);
-      const groupsResp = await sonos.getGroups(accessToken, conn.sonos_household_id);
+      // Si en el callback OAuth no había hogar (p. ej. la cuenta aún no tenía parlantes), el
+      // household_id quedó NULL. Se vuelve a pedir aquí y se guarda, en vez de fallar para siempre.
+      let householdId = conn.sonos_household_id;
+      if (!householdId) {
+        const hh = await sonos.getHouseholds(accessToken);
+        const first = (hh.households || [])[0];
+        if (!first) return { statusCode:200, headers:H, body: JSON.stringify({ connected:true, groups:[], note:'La cuenta Sonos autorizada no tiene ningún hogar/parlante todavía.' }) };
+        householdId = first.id;
+        await sb.from('sonos_connections').update({ sonos_household_id: householdId, updated_at: new Date().toISOString() }).eq('id', conn.id);
+      }
+      const groupsResp = await sonos.getGroups(accessToken, householdId);
       return { statusCode:200, headers:H, body: JSON.stringify({ connected:true, groups: groupsResp.groups||[] }) };
     }
 
@@ -53,11 +63,9 @@ exports.handler = async (event) => {
       const { data: conn } = await sb.from('sonos_connections').select('*').eq('client_id', client_id).maybeSingle();
       if (!conn || conn.status !== 'conectado') return { statusCode:400, headers:H, body: JSON.stringify({ error:'Este Negocio todavía no autorizó la conexión con Sonos.' }) };
 
-      const accessToken = await sonos.getValidAccessToken(sb, conn);
-      const session = await sonos.createPlaybackSession(accessToken, sonos_group_id, 'ponmusic:' + client_id);
-      const queueBaseUrl = publicSiteUrl() + '/.netlify/functions/api-sonos-cloudqueue/' + sonos_group_id + '/v2.0';
-      await sonos.loadCloudQueue(accessToken, session.sessionId, queueBaseUrl, 'Bearer ponmusic-internal');
-
+      // ORDEN IMPORTANTE: la fila de estado se guarda ANTES de hablar con Sonos. En cuanto
+      // Sonos recibe loadCloudQueue empieza a pedir /context e /itemWindow de inmediato; si la
+      // fila todavía no existe, esos primeros pedidos recibirían 404 y la carga fallaría.
       const row = {
         sonos_group_id, connection_id: conn.id, client_id, station_id: station_id || null, channel_id,
         queue_items: [], clock_pointer: 0, recent_played: {}, freq_counters: {}, seq_indexes: {},
@@ -66,7 +74,20 @@ exports.handler = async (event) => {
       const { error } = await sb.from('sonos_playback_state').upsert([row], { onConflict: 'sonos_group_id' });
       if (error) throw error;
 
-      return { statusCode:200, headers:H, body: JSON.stringify({ ok:true, sessionId: session.sessionId }) };
+      const accessToken = await sonos.getValidAccessToken(sb, conn);
+      const session = await sonos.createPlaybackSession(accessToken, sonos_group_id, 'ponmusic:' + client_id);
+      // Evidencia para la primera prueba real: qué campos devuelve Sonos al crear la sesión
+      // (la documentación no muestra el nombre exacto del campo del id de sesión).
+      console.log('[sonos] playbackSession creada — campos: ' + Object.keys(session || {}).join(', '));
+      const sessionId = session.sessionId || session.id;
+      if (!sessionId) throw new Error('Sonos no devolvió un id de sesión (campos recibidos: ' + Object.keys(session || {}).join(', ') + ')');
+      const queueBaseUrl = publicSiteUrl() + '/.netlify/functions/api-sonos-cloudqueue/' + sonos_group_id + '/v2.0';
+      // Token propio de este grupo (HMAC): Sonos lo reenviará en el header Authorization
+      // y api-sonos-cloudqueue.js lo comprueba.
+      const loadResp = await sonos.loadCloudQueue(accessToken, sessionId, queueBaseUrl, sonos.queueAuthToken(sonos_group_id));
+      console.log('[sonos] loadCloudQueue OK — respuesta: ' + JSON.stringify(loadResp).slice(0, 300));
+
+      return { statusCode:200, headers:H, body: JSON.stringify({ ok:true, sessionId: sessionId }) };
     }
 
     return { statusCode:405, headers:H, body: JSON.stringify({ error:'Método no permitido' }) };
