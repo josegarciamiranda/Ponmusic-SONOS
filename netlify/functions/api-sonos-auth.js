@@ -23,7 +23,9 @@ exports.handler = async (event) => {
       // El 'state' lleva client_id/station_id de ida y vuelta — Sonos nos lo
       // devuelve tal cual en el callback, así sabemos para quién era esta conexión
       // sin tener que guardar nada en una sesión de servidor mientras tanto.
-      const state = Buffer.from(JSON.stringify({ client_id: q.client_id, station_id: q.station_id || null, t: Date.now() })).toString('base64url');
+      // Va FIRMADO (HMAC) y con hora: en el callback se verifica que lo armó este servidor
+      // y que no tiene más de 30 minutos (ver signState/verifyState en sonos-client.js).
+      const state = sonos.signState({ client_id: q.client_id, station_id: q.station_id || null, t: Date.now() });
       const url = sonos.buildAuthorizeUrl(state);
       return { statusCode:302, headers: Object.assign({}, H, { Location: url }) };
     }
@@ -36,12 +38,15 @@ exports.handler = async (event) => {
       if (!q.code || !q.state) return { statusCode:400, headers:H, body:JSON.stringify({error:'code y state requeridos'}) };
 
       let state;
-      try { state = JSON.parse(Buffer.from(q.state, 'base64url').toString('utf8')); }
-      catch (e) { return { statusCode:400, headers:H, body:JSON.stringify({error:'state inválido'}) }; }
+      try { state = sonos.verifyState(q.state); }
+      catch (e) {
+        console.error('[sonos] callback rechazado por state inválido: ' + e.message);
+        return { statusCode:400, headers:{'Content-Type':'text/html; charset=utf-8'}, body: htmlResult(false, 'La solicitud de conexión no es válida o caducó. Vuelve a iniciar la conexión desde PonMusic.') };
+      }
 
       const tokenResp = await sonos.exchangeCodeForToken(q.code);
-      // OJO VERIFICAR: se asume que la respuesta trae access_token/refresh_token/expires_in
-      // (estándar OAuth2) — confirmar con el primer intento real contra Sonos.
+      // VERIFICADO el 20/10 con una cuenta real: Sonos devuelve access_token, refresh_token,
+      // expires_in (86399 s ≈ 24 h), token_type=Bearer y scope=playback-control-all.
       const accessToken = tokenResp.access_token;
       const refreshToken = tokenResp.refresh_token;
       const expiresInSec = tokenResp.expires_in || 3600;
