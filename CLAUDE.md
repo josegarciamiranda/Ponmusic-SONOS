@@ -153,3 +153,46 @@ el canal completo del cliente.
   `httpAuthorization` en `api-sonos-cloudqueue.js` (hoy se envía pero no se valida).
 - Seguridad: la clave del admin viene como `admin123`; cambiarla con
   `extras/cambiar_clave_admin.sql` antes de desplegar.
+
+## Revisión previa a la prueba con el cliente (v3, 20/10)
+
+**Verificado con Sonos real (20/10, cuenta de prueba sin parlantes):** el OAuth completo.
+`/login/v3/oauth/access` devuelve `access_token, expires_in (86399 s ≈ 24 h), refresh_token,
+scope (playback-control-all), token_type (Bearer)`. El request (parámetros en la query string +
+Basic auth) era correcto; la variante con cuerpo POST NO hace falta. Fila en `sonos_connections`
+con `status=conectado`, `sonos_household_id` NULL (la cuenta no tenía parlantes) y vencimiento a 24 h.
+El refresh del token sigue SIN probarse (se podrá probar pasado el vencimiento).
+
+**RIESGO ABIERTO (el más importante):** la documentación de Sonos ("About Cloud Queue API") dice que
+la Cola en la nube es "para integraciones de contenido únicamente"; la integración creada es de
+CONTROL (Direct Control Integration). `loadCloudQueue` sí figura en la referencia de la Control API
+y no declara requisitos, pero NO está confirmado que una integración de control pueda usarlo.
+Además Sonos avisa que hay licencia aparte para socios de contenido con cuentas comerciales.
+Hay que preguntarle a Sonos (soporte de developer.sonos.com) o descubrirlo con el primer
+`loadCloudQueue` real (401/403 = permisos). `loadStreamUrl` solo sirve para emisoras en vivo.
+
+**Cambios de esta versión** (32 pruebas simuladas en `scratchpad/test/run.js`, sin Sonos real):
+- `api-sonos-connect.js`: la fila `sonos_playback_state` se guarda ANTES de `loadCloudQueue`
+  (Sonos pide la cola de inmediato; antes habría recibido 404). Completa el household si quedó
+  NULL. Registra los campos de la sesión creada (el nombre del id de sesión no está confirmado).
+- `api-sonos-cloudqueue.js`: endpoint `POST /timePlayed` → 204 sin cuerpo; `queueVersion`
+  constante (antes cambiaba en cada pedido y Sonos habría recargado sin parar); registros
+  `[sonos-cq]` de cada petición; validación del header Authorization.
+- `sonos-client.js`: `signState/verifyState` (state del OAuth firmado con HMAC, caduca a 30 min) y
+  `queueAuthToken/checkQueueAuth` (token por grupo, derivado de SONOS_CLIENT_SECRET).
+- `api-sonos-auth.js`: usa el state firmado; rechaza states falsificados antes de llamar a Sonos.
+- `sonos-queue-engine.js`: horarios evaluados en la zona de las tiendas (`SONOS_TIMEZONE`, por
+  defecto America/La_Paz; las funciones de Netlify corren en UTC); los anuncios extra de
+  `countPerTrigger>1` ya no se pierden.
+
+**Variables de entorno opcionales nuevas:** `SONOS_TIMEZONE` (ej. America/Lima) y
+`SONOS_QUEUE_AUTH_MODE` (por defecto modo "log": solo advierte si el header no calza; pasar a
+`enforce` cuando los logs muestren `auth=OK` en pedidos reales de Sonos).
+
+**Sigue sin verificar con parlante real:** esquema exacto de `itemWindow` (no se pudo abrir el
+esquema completo en la documentación), campo del id de sesión, que Sonos reenvíe el header
+Authorization, reproducción de los MP3 (16–48 kHz; VBR necesita tabla Xing) y el efecto de
+`createSession` (termina la sesión existente del grupo: probar con la tienda cerrada).
+
+**Pendientes de seguridad:** las funciones de PonMusic no autentican al llamador (diseño heredado);
+tokens de Sonos en texto plano; repo público; `r2.dev` es solo para pruebas (usar dominio propio).
