@@ -24,6 +24,23 @@
 */
 const { getSupabase } = require('./db');
 
+/* "Ahora" en la zona horaria de las tiendas.
+   Las Netlify Functions corren en UTC. Los Relojes y la Programación se definen con la
+   hora de la tienda (ej. "08:00–12:00" en Bolivia); el navegador las evaluaba con la hora
+   local, pero acá, sin esto, se habrían evaluado en UTC (4 horas de diferencia).
+   Se devuelve un Date cuyos getters locales (getDay, getHours, toTimeString...) muestran
+   la hora de pared de esa zona — así el resto del código no cambia.
+   Zona: variable de entorno SONOS_TIMEZONE (por defecto America/La_Paz, UTC-4). */
+function nowInTZ(tz) {
+  const zone = tz || process.env.SONOS_TIMEZONE || 'America/La_Paz';
+  const parts = {};
+  new Intl.DateTimeFormat('en-US', {
+    timeZone: zone, hourCycle: 'h23',
+    year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit',
+  }).formatToParts(new Date()).forEach(p => { parts[p.type] = p.value; });
+  return new Date(+parts.year, +parts.month - 1, +parts.day, +parts.hour, +parts.minute, +parts.second);
+}
+
 function localDateStrInTZ(d) { return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); }
 const DAYS = ['lunes','martes','miercoles','jueves','viernes','sabado','domingo'];
 
@@ -126,7 +143,7 @@ async function loadChannelContext(sb, clientId) {
 /* Genera UN ítem más de cola (canción o anuncio) a partir del estado persistido,
    y devuelve { item, newState } — newState son los campos mutables a guardar. */
 function generateNextItem(ctx, channelId, storeId, state) {
-  const now = new Date();
+  const now = nowInTZ();
   const recentPlayed = Object.assign({}, state.recent_played||{});
   const freqCounters = Object.assign({}, state.freq_counters||{});
   const seqIndexes = Object.assign({}, state.seq_indexes||{});
@@ -146,10 +163,12 @@ function generateNextItem(ctx, channelId, storeId, state) {
         freqCounters[s.id] = 0;
         const ads = pickAdsForTrigger(s, liveAds.ads, seqIndexes);
         if (ads.length) {
-          const ad = ads[0]; // una posición de cola = un ítem; si countPerTrigger>1, los siguientes salen en las próximas llamadas
-          if (ads.length > 1) state.__pendingAds = (state.__pendingAds||[]).concat(ads.slice(1));
+          // Una posición de cola = un ítem. Si countPerTrigger>1, el primero va en 'item' y el
+          // resto en 'extra' (ensureQueueUpTo los agrega seguidos). Antes los extras se perdían.
+          const toItem = (ad) => ({ title: ad.title, artist: 'Anuncio', url: ad.url, duration: ad.duration||0, isAd: true });
           return {
-            item: { title: ad.title, artist: 'Anuncio', url: ad.url, duration: ad.duration||0, isAd: true },
+            item: toItem(ads[0]),
+            extra: ads.slice(1).map(toItem),
             newState: { recent_played: recentPlayed, freq_counters: freqCounters, seq_indexes: seqIndexes, clock_pointer: clockPointer },
           };
         }
@@ -185,9 +204,9 @@ async function ensureQueueUpTo(sb, stateRow, ctx, targetIndex) {
   let guard = 0;
   while (items.length <= targetIndex && guard < (targetIndex + 50)) {
     guard++;
-    const { item, newState } = generateNextItem(ctx, stateRow.channel_id, null, state);
+    const { item, extra, newState } = generateNextItem(ctx, stateRow.channel_id, null, state);
     state = Object.assign({}, state, newState);
-    if (item) items.push(item);
+    if (item) { items.push(item); if (extra && extra.length) extra.forEach(x => items.push(x)); }
     else break; // no hay nada que programar (sin reloj / sin canciones) — no insistir en bucle
   }
   const updated = {
@@ -202,4 +221,4 @@ async function ensureQueueUpTo(sb, stateRow, ctx, targetIndex) {
   return Object.assign({}, stateRow, updated);
 }
 
-module.exports = { loadChannelContext, ensureQueueUpTo, toCloudQueueTrack };
+module.exports = { loadChannelContext, ensureQueueUpTo, toCloudQueueTrack, nowInTZ, generateNextItem, getActiveSchedule };
