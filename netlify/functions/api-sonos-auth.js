@@ -31,7 +31,7 @@ exports.handler = async (event) => {
     if (q.action === 'callback') {
       if (q.error) {
         // El dueño de la cuenta Sonos canceló la autorización, o algo falló del lado de Sonos.
-        return { statusCode:200, headers:{'Content-Type':'text/html'}, body: htmlResult(false, 'Sonos reportó: ' + q.error) };
+        return { statusCode:200, headers:{'Content-Type':'text/html; charset=utf-8'}, body: htmlResult(false, 'Sonos reportó: ' + q.error) };
       }
       if (!q.code || !q.state) return { statusCode:400, headers:H, body:JSON.stringify({error:'code y state requeridos'}) };
 
@@ -46,7 +46,7 @@ exports.handler = async (event) => {
       const refreshToken = tokenResp.refresh_token;
       const expiresInSec = tokenResp.expires_in || 3600;
       if (!accessToken || !refreshToken) {
-        return { statusCode:200, headers:{'Content-Type':'text/html'}, body: htmlResult(false, 'Sonos no devolvió los tokens esperados — revisar el formato real de la respuesta (ver sonos-client.js).') };
+        return { statusCode:200, headers:{'Content-Type':'text/html; charset=utf-8'}, body: htmlResult(false, 'Sonos no devolvió los tokens esperados — revisar el formato real de la respuesta (ver sonos-client.js).') };
       }
 
       const households = await sonos.getHouseholds(accessToken).catch(() => ({ households: [] }));
@@ -69,13 +69,13 @@ exports.handler = async (event) => {
       const { error } = await sb.from('sonos_connections').upsert([row], { onConflict: 'id' });
       if (error) throw error;
 
-      return { statusCode:200, headers:{'Content-Type':'text/html'}, body: htmlResult(true, household ? ('Conectado a: ' + (household.name || household.id)) : 'Conectado (sin información de hogar).') };
+      return { statusCode:200, headers:{'Content-Type':'text/html; charset=utf-8'}, body: htmlResult(true, household ? ('Conectado a: ' + (household.name || household.id)) : 'Conectado (sin información de hogar).') };
     }
 
     return { statusCode:400, headers:H, body:JSON.stringify({error:'action inválido'}) };
   } catch (e) {
     console.error('api-sonos-auth error:', e);
-    return { statusCode:200, headers:{'Content-Type':'text/html'}, body: htmlResult(false, e.message) };
+    return { statusCode:200, headers:{'Content-Type':'text/html; charset=utf-8'}, body: htmlResult(false, e.message) };
   }
 };
 
