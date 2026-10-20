@@ -158,7 +158,51 @@ async function getValidAccessToken(sb, connection) {
   return fresh.access_token;
 }
 
+/* ---- Firmas HMAC (seguridad) ---------------------------------------------------
+   Se usa SONOS_CLIENT_SECRET como llave: ya existe, solo la conoce nuestro servidor,
+   y así no hace falta una variable de entorno ni una columna nuevas.
+
+   1) 'state' del OAuth: antes viajaba sin firmar (base64 de un JSON), así que cualquiera
+      podía armar un state con el client_id de OTRO negocio y, al autorizar con su propia
+      cuenta Sonos, pisar la conexión de ese negocio. Ahora va firmado y caduca.
+   2) Token de la Cola en la nube: antes loadCloudQueue mandaba 'Bearer ponmusic-internal'
+      (igual para todos y nunca validado). Ahora es un token por grupo, derivado con HMAC. */
+const crypto = require('crypto');
+
+function hmac(text) {
+  return crypto.createHmac('sha256', env('SONOS_CLIENT_SECRET')).update(text).digest('base64url');
+}
+function safeEqual(a, b) {
+  const x = Buffer.from(String(a)), y = Buffer.from(String(b));
+  return x.length === y.length && crypto.timingSafeEqual(x, y);
+}
+
+function signState(obj) {
+  const payload = Buffer.from(JSON.stringify(obj)).toString('base64url');
+  return payload + '.' + hmac('state:' + payload);
+}
+
+/* Devuelve el objeto original, o lanza Error si la firma no calza o ya caducó. */
+function verifyState(signed, maxAgeMs) {
+  const i = String(signed || '').lastIndexOf('.');
+  if (i < 1) throw new Error('state sin firma');
+  const payload = signed.slice(0, i), sig = signed.slice(i + 1);
+  if (!safeEqual(sig, hmac('state:' + payload))) throw new Error('firma de state inválida');
+  const obj = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
+  if (!obj.t || Date.now() - obj.t > (maxAgeMs || 30 * 60 * 1000)) throw new Error('state caducado');
+  return obj;
+}
+
+/* Token que Sonos nos devolverá en el header Authorization al pedir la cola de ESTE grupo. */
+function queueAuthToken(groupId) {
+  return 'Bearer ' + hmac('queue:' + groupId);
+}
+function checkQueueAuth(groupId, headerValue) {
+  return !!headerValue && safeEqual(headerValue, queueAuthToken(groupId));
+}
+
 module.exports = {
   buildAuthorizeUrl, exchangeCodeForToken, refreshAccessToken, getValidAccessToken,
   getHouseholds, getGroups, createPlaybackSession, loadCloudQueue,
+  signState, verifyState, queueAuthToken, checkQueueAuth,
 };
